@@ -1,105 +1,166 @@
 <?php
-/**
- *  Original Code Copyright (C) 2005, 2006, 2007, 2008  Brice Burgess <bhb@iceburg.net>
- *  released originally under GPLV2
- * 
- *  This file is part of poMMo.
- *
- *  poMMo is free software: you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation, either version 3 of the License, or
- *  (at your option) any later version.
- *
- *  poMMo is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with Pommo.  If not, see <http://www.gnu.org/licenses/>.
- * 
- *  This fork is from https://github.com/soonick/poMMo
- *  Please see docs/contribs for Contributors
- *
- */
+/***************************************
+* poMMo Activation File
+* Loads needed libraries and checks db
+***************************************/
 
-/**********************************
-	INITIALIZATION METHODS
- *********************************/
-require 'bootstrap.php';
-require_once Pommo::$_baseDir.'classes/Pommo_Subscribers.php';
-require_once Pommo::$_baseDir . 'classes/Pommo_Helper_Messages.php';
+define('_poMMo_support','http://pommo.org/');
 
-Pommo::init(array('authLevel' => 0,'noSession' => true));
-$logger = Pommo::$_logger;
-$dbo = Pommo::$_dbo;
+require_once (dirname(__FILE__).'/bootstrap.php');
+require_once (bm_baseDir.'/classes/Pommo_Install.php');
 
-/**********************************
-	SETUP TEMPLATE, PAGE
- *********************************/
-require_once Pommo::$_baseDir.'classes/Pommo_Template.php';
-$view = new Pommo_Template();
+session_start();
+session_unset();
+session_destroy();
 
-// make sure email/login is valid
-$subscriber = current(Pommo_Subscribers::get(array (
-	'email' => (empty($_REQUEST['email'])) ? '0' : $_REQUEST['email'], 'status' => 1
-)));
+$logger->debug('poMMo activating...');
 
-if (empty($subscriber))
-{
-	Pommo::redirect('login.php');
+$dbpass = '';
+$dbhost = 'localhost';
+$dbuser = '';
+$dbport = '';
+$dbtype = 'mysql';
+$prefix = 'pommo_';
+$dbname = '';
+
+$template->assign('dbpass',$dbpass);
+$template->assign('dbhost',$dbhost);
+$template->assign('dbuser',$dbuser);
+$template->assign('dbport',$dbport);
+$template->assign('dbtype',$dbtype);
+$template->assign('prefix',$prefix);
+$template->assign('dbname',$dbname);
+$template->assign('support', _poMMo_support);
+
+if(!empty($_POST)) {
+    $logger->debug('post dump: ' . print_r($_POST,true));
+
+    // get posted vars
+    $dbhost = $_POST['dbhost'];
+    $dbuser = $_POST['dbuser'];
+    $dbpass = $_POST['dbpass'];
+    $dbport = $_POST['dbport'];
+    $dbtype = $_POST['dbtype'];
+    $dbname = $_POST['dbname'];
+    $prefix = $_POST['prefix'];
+
+    if(strtolower($dbtype) != 'mysql' && strtolower($dbtype) != 'mysqli') {
+        $logger->addMsg("Unsupported Database Type -- only MySQL is supported", 1);
+    }
+
+    // (Opcional) construir DSN caso queiras usar Connect($dsn)
+    /*
+    $dsn = (strtolower($dbtype) == 'mysql')
+        ? 'mysql://' . $dbuser . ':' . $dbpass . '@' . $dbhost . '/' . $dbname
+        : 'mysqli://' . $dbuser . ':' . $dbpass . '@' . $dbhost . '/' . $dbname;
+    */
+
+    include_once (bm_baseDir.'/inc/adodb/adodb.inc.php'); // require ADODB
+
+    // Removido o & (incompatível com versões modernas de PHP)
+    $dbobject = ADONewConnection($dbtype);
+
+    // Removido @ para não suprimir erros
+    $connected = $dbobject->Connect($dbhost, $dbuser, $dbpass, $dbname);
+
+    if(!$connected || !$dbobject->IsConnected()) {
+        $logger->addMsg(
+            "The information you provided does not allow a connection to the database. ".
+            "Check username, password, and database name.",
+            1
+        );
+    }
+
+    if(!$logger->isErr()) {
+        $install = new Pommo_Install($dbobject);
+        $install->dbtype = strtolower($dbtype);
+        $install->prefix = $prefix;
+
+        // check if database is installed or incomplete
+        $data = $install->isInstalled();
+
+        // if installed, prompt user if they want to upgrade
+        if($data == 'complete' || $data == 'incomplete') {
+            // currently cannot upgrade incomplete
+            if($data == 'incomplete') {
+                $logger->addMsg(
+                    "You have an incomplete database installation. ".
+                    "If you want to start fresh, drop all existing tables before continuing.",
+                    1
+                );
+            }
+            else {
+                $logger->addMsg(
+                    "It appears you already have a complete database installation. ".
+                    "Upgrading an existing database is not supported at this time. ".
+                    "If you want to start fresh, drop all existing tables before continuing.",
+                    1
+                );
+            }
+        }
+        else {
+            // we can proceed with the activation.
+            // DB exists? If not, attempt to create
+            if(!$install->dbExists()) {
+                $logger->addMsg(
+                    "The database you specified (" . $dbname . ") does not exist. ".
+                    "Attempting to create it. If this fails, you must create the database yourself ".
+                    "(using a tool like phpMyAdmin or cPanel) or have your hosting provider do so."
+                );
+
+                if(!$install->dbCreate($dbname)) {
+                    $logger->addMsg(
+                        "Database creation attempt failed. ".
+                        "Check permissions or contact your hosting provider.", 
+                        1
+                    );
+                }
+                else {
+                    $dbobject->Close();
+                    // novamente, removido @
+                    $dbobject->Connect($dbhost, $dbuser, $dbpass, $dbname);
+                }
+            }
+
+            if(!$logger->isErr()) {
+                // create tables
+                if(!$install->createTables()) {
+                    $logger->addMsg(
+                        "Error occured while trying to create tables. Perhaps they already exist?", 
+                        1
+                    );
+                }
+                else {
+                    // success, DB is installed. Create config file
+                    if($install->writeConfig($dbhost,$dbuser,$dbpass,$dbname,$dbtype,$prefix,$dbport)) {
+                        $logger->addMsg(
+                            "Database installed successfully! ".
+                            "Configuration file has been written. ".
+                            "You can now proceed to the next step!"
+                        );
+                        Pommo::redirect('install.php');
+                    }
+                    else {
+                        $logger->addMsg(
+                            "Database installed successfully, but could not write config file. ".
+                            "Copy the following into your config.php file:",
+                            1
+                        );
+                        $template->assign('configStr',$install->_configStr);
+                    }
+                }
+            }
+        }
+    }
+
+    $template->assign('dbpass',$dbpass);
+    $template->assign('dbhost',$dbhost);
+    $template->assign('dbuser',$dbuser);
+    $template->assign('dbport',$dbport);
+    $template->assign('dbtype',$dbtype);
+    $template->assign('prefix',$prefix);
+    $template->assign('dbname',$dbname);
 }
 
-// see if an activation email was sent to this subscriber in the last 2 minutes;
-$query =
-	'SELECT 
-		*
-	FROM 
-		'.$dbo->table['scratch']."
-	WHERE
-		`type`=1
-		AND `int`=%i
-		AND `time` > (NOW() - INTERVAL 2 MINUTE)
-	LIMIT 1";
-$query = $dbo->prepare($query,array($subscriber['id']));
-$test = $dbo->query($query,0);
-
-// attempt to send activation code if once has not recently been sent
-if (empty($test))
-{
-	$code = Pommo_Subscribers::getActCode($subscriber);
-	if (Pommo_Helper_Messages::sendMessage(array (
-			'to' => $subscriber['email'],
-			'code' => $code,
-			'type' => 'activate')))
-	{
-		$view->assign('sent', true);
-		
-		// timestamp this activation email
-		$query = "
-			INSERT INTO ".$dbo->table['scratch']."
-			SET
-				`type`=1,
-				`int`=%i";
-		$query = $dbo->prepare($query,array($subscriber['id']));
-		$dbo->query($query);
-		
-		// remove ALL activation email timestamps older than 2 minutes
-		$query = "
-			DELETE FROM 
-				".$dbo->table['scratch']."
-			WHERE
-				`type`=1
-				AND `time` < (NOW() - INTERVAL 2 MINUTE)";
-		$query = $dbo->prepare($query,array());
-		$dbo->query($query);
-	}
-}
-else {
-	$view->assign('sent', false);
-}
-
-
-$view->assign('email', $subscriber['email']);
-$view->display('user/activate');
-
+$template->display('activate');
+?>
