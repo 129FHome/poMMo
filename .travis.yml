@@ -1,8 +1,38 @@
 language: php
+
+# Lista de versões que iremos testar
 php:
-  - "5.4"
+  - 7.4
+  - 8.0
+  - 8.1
+  - 8.2
+
+# Definir se queremos a infra mais recente do Travis
+# Por exemplo:
+dist: focal
+
+before_install:
+  # Se precisar de mudar configs do php.ini...
+  # (Neste exemplo, vou comentar porque é algo específico de cada caso.)
+  # - phpenv config-add .travis-php.ini
+
+install:
+  # Se o projeto tiver um ficheiro composer.json,
+  # convém instalar dependências antes de correr testes:
+  - composer install --no-interaction --prefer-dist
+
 before_script:
-  - pyrus install pear/PHP_CodeSniffer
-  - phpenv rehash
-  - npm install
-script: "./node_modules/grunt-cli/bin/grunt"
+  - mkdir -p build/logs
+  # Preparar base de dados
+  - mysql -e 'create database IF NOT EXISTS travis_ci_test;' -uroot
+  - mysql -e 'CREATE USER IF NOT EXISTS travis@localhost;' -uroot
+  - mysql -e 'GRANT ALL on travis_ci_test.* TO travis@localhost;' -uroot
+  # Caso use PostgreSQL, poderíamos descomentar o psql
+  # - psql -c 'create database travis_ci_test;' -U postgres
+
+script:
+  # Se phpunit estiver instalado via Composer (vendor/bin/phpunit), chama-se:
+  - vendor/bin/phpunit --configuration phpunit.xml --coverage-clover build/logs/clover.xml
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
